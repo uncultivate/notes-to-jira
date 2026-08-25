@@ -36,7 +36,10 @@ function Assert-WindowsPlatform {
     }
 
     if (-not $RunningOnWindows) {
-        throw 'Jira PAT storage requires Windows Credential Manager.'
+        throw (
+            "Jira PAT storage requires Windows Credential Manager.`n`n" +
+            'Run this application on Windows 10/11 or Windows Server with the same account that stores the token.'
+        )
     }
 }
 
@@ -100,16 +103,6 @@ public static class JiraCredentialManager
         int type,
         int reservedFlag,
         out IntPtr credentialPointer);
-
-    [DllImport(
-        "advapi32.dll",
-        EntryPoint = "CredDeleteW",
-        CharSet = CharSet.Unicode,
-        SetLastError = true)]
-    private static extern bool CredDelete(
-        string targetName,
-        int type,
-        int flags);
 
     [DllImport(
         "advapi32.dll",
@@ -297,26 +290,6 @@ public static class JiraCredentialManager
             }
         }
     }
-
-    public static bool Delete(string targetName)
-    {
-        if (CredDelete(targetName, CRED_TYPE_GENERIC, 0))
-        {
-            return true;
-        }
-
-        int error = Marshal.GetLastWin32Error();
-
-        if (error == ERROR_NOT_FOUND)
-        {
-            return false;
-        }
-
-        throw new Win32Exception(
-            error,
-            "Windows Credential Manager could not delete credential '" +
-            targetName + "'.");
-    }
 }
 '@ -ErrorAction Stop
 }
@@ -332,12 +305,13 @@ function Test-JiraPatSecret {
     Assert-WindowsPlatform
 
     try {
-        return :Exists($Target)
+        return [JiraCredentialManager]::Exists($Target)
     }
     catch {
         throw (
-            "Could not check Jira PAT credential '$Target'. " +
-            "Details: $($_.Exception.Message)"
+            "Could not check whether a Jira PAT is stored for '$Target'.`n`n" +
+            'Windows Credential Manager must be available to this Windows account.' +
+            "`nTechnical detail: $($_.Exception.Message)"
         )
     }
 }
@@ -383,7 +357,10 @@ function Set-JiraPatSecret {
 
     try {
         if ($SecurePat.Length -lt 1) {
-            throw 'The Jira PAT cannot be empty.'
+            throw (
+                "The Jira PAT cannot be empty.`n`n" +
+                'Paste the token from Jira (Profile > Personal Access Tokens) when prompted.'
+            )
         }
 
         if ($PSCmdlet.ShouldProcess(
@@ -391,7 +368,7 @@ function Set-JiraPatSecret {
             'Store Jira PAT in Windows Credential Manager'
         )) {
             try {
-                :Write(
+                [JiraCredentialManager]::Write(
                     $Target,
                     $UserName,
                     $SecurePat
@@ -399,7 +376,7 @@ function Set-JiraPatSecret {
 
                 # Read the credential back to confirm that it was stored.
                 $ValidationValue =
-                    :Read($Target)
+                    [JiraCredentialManager]::Read($Target)
 
                 try {
                     if (
@@ -426,8 +403,9 @@ function Set-JiraPatSecret {
             }
             catch {
                 throw (
-                    'Could not store the Jira PAT in Windows ' +
-                    "Credential Manager. Details: $($_.Exception.Message)"
+                    "Could not store the Jira PAT in Windows Credential Manager.`n`n" +
+                    'Make sure you are running as the Windows account that should own the credential.' +
+                    "`nTechnical detail: $($_.Exception.Message)"
                 )
             }
         }
@@ -450,24 +428,34 @@ function Get-JiraPatSecret {
     Assert-WindowsPlatform
 
     try {
-        $SecurePat = :Read($Target)
+        $SecurePat = [JiraCredentialManager]::Read($Target)
 
         if ($null -eq $SecurePat) {
-            throw 'Windows Credential Manager returned no value.'
+            throw (
+                "No Jira PAT is stored for '$Target' in Windows Credential Manager.`n`n" +
+                'Fix: re-run this script so it can prompt for a token, or use -ReplacePat.'
+            )
         }
 
         if ($SecurePat.Length -lt 1) {
-            throw 'The stored Jira PAT is empty.'
+            throw (
+                "The stored Jira PAT for '$Target' is empty.`n`n" +
+                'Fix: re-run this script with -ReplacePat and paste a new token from Jira.'
+            )
         }
 
         return $SecurePat
     }
     catch {
+        $CaughtMessage = [string]$_.Exception.Message
+        if ($CaughtMessage -match '(?s)^(No Jira PAT is stored|The stored Jira PAT)') {
+            throw
+        }
+
         throw (
-            "Could not retrieve Jira PAT credential '$Target'. " +
-            'Ensure that the credential was created by the Windows ' +
-            'account currently running this application. ' +
-            "Details: $($_.Exception.Message)"
+            "Could not retrieve the Jira PAT from Windows Credential Manager (target: '$Target').`n`n" +
+            'Use the same Windows account that stored the token.' +
+            "`nTechnical detail: $CaughtMessage"
         )
     }
 }
@@ -500,42 +488,9 @@ function ConvertFrom-SecureStringPlainText {
     }
 }
 
-function Remove-JiraPatSecret {
-    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
-    param(
-        [Parameter(Mandatory)]
-        [ValidateNotNullOrEmpty()]
-        [string]$Target
-    )
-
-    Assert-WindowsPlatform
-
-    if (-not (Test-JiraPatSecret -Target $Target)) {
-        return $false
-    }
-
-    if ($PSCmdlet.ShouldProcess(
-        $Target,
-        'Remove Jira PAT from Windows Credential Manager'
-    )) {
-        try {
-            return :Delete($Target)
-        }
-        catch {
-            throw (
-                "Could not remove Jira PAT credential '$Target'. " +
-                "Details: $($_.Exception.Message)"
-            )
-        }
-    }
-
-    return $false
-}
-
 Export-ModuleMember -Function @(
     'ConvertFrom-SecureStringPlainText',
     'Get-JiraPatSecret',
-    'Remove-JiraPatSecret',
     'Set-JiraPatSecret',
     'Test-JiraPatSecret'
 )

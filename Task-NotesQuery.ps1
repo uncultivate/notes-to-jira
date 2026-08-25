@@ -66,8 +66,8 @@ function Get-ConfiguredEpicKey {
     }
 
     throw (
-        "No Epic key is configured for mailbox '$([string]$Mailbox.name)'. " +
-        'Set mailboxes[].jira.epicKey (preferred) or jira.defaultEpicKey in config.json.'
+        "No Epic key is configured for mailbox '$([string]$Mailbox.name)'.`n`n" +
+        'Set mailboxes[].jira.epicKey (preferred) or jira.defaultEpicKey in config.json to an Epic issue key.'
     )
 }
 
@@ -82,8 +82,27 @@ function Get-JiraComponentByName {
     $Matches = @($Components | Where-Object {
         ([string]$_.name).Trim().Equals($ComponentName.Trim(), [StringComparison]::OrdinalIgnoreCase)
     })
-    if ($Matches.Count -eq 0) { throw "Jira component '$ComponentName' was not found in project '$ProjectKey'." }
-    if ($Matches.Count -gt 1) { throw "More than one Jira component is named '$ComponentName' in project '$ProjectKey'." }
+    if ($Matches.Count -eq 0) {
+        $AvailableNames = @($Components | ForEach-Object {
+            "'$(([string]$_.name).Trim())'"
+        } | Sort-Object)
+        $AvailableText = if ($AvailableNames.Count -eq 0) {
+            '(none returned - check project permissions)'
+        }
+        else {
+            $AvailableNames -join ', '
+        }
+        throw (
+            "Jira component '$ComponentName' was not found in project '$ProjectKey'.`n`n" +
+            "Set mailboxes[].jira.componentName to one of: $AvailableText"
+        )
+    }
+    if ($Matches.Count -gt 1) {
+        throw (
+            "More than one Jira component is named '$ComponentName' in project '$ProjectKey'.`n`n" +
+            'Rename the duplicate in Jira, or use a unique component name in config.json.'
+        )
+    }
     return $Matches[0]
 }
 
@@ -124,8 +143,18 @@ $($Email.emailBody)<br><br>
         issuetype   = @{ name = [string]$Mailbox.jira.issueType }
     }
 
-    if ([string]::IsNullOrWhiteSpace($EpicFieldId)) { throw 'The Epic Link field ID is blank.' }
-    if ([string]::IsNullOrWhiteSpace($EpicKey)) { throw 'The configured Epic key is blank.' }
+    if ([string]::IsNullOrWhiteSpace($EpicFieldId)) {
+        throw (
+            "The Epic Link field ID is blank.`n`n" +
+            'Re-run Setup-JiraEmailImporter.ps1 to confirm the Epic Link field is available.'
+        )
+    }
+    if ([string]::IsNullOrWhiteSpace($EpicKey)) {
+        throw (
+            "The configured Epic key is blank.`n`n" +
+            'Set mailboxes[].jira.epicKey or jira.defaultEpicKey in config.json.'
+        )
+    }
 
     $Fields[$EpicFieldId] = $EpicKey
     $StartField = [string](Get-OptionalPropertyValue -Object $Config.jira -Name 'startDateFieldId')
@@ -162,102 +191,141 @@ function Save-State {
     $State | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding UTF8
 }
 
+$ConsoleModule = Join-Path $ApplicationRoot 'Modules\Console.psm1'
+if (-not (Test-Path -LiteralPath $ConsoleModule -PathType Leaf)) {
+    throw "Required module not found: $ConsoleModule"
+}
+Import-Module $ConsoleModule -Force -ErrorAction Stop
+
 if ([Environment]::Is64BitProcess) {
-    throw 'Run this script with the root-level launcher or 32-bit Windows PowerShell.'
+    $SysWowPowerShell = Join-Path $env:windir 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
+    $LaunchCommand = '{0} -NoProfile -File "{1}"' -f $SysWowPowerShell, $PSCommandPath
+    Write-UiError -Message (
+        "This script must run in 32-bit Windows PowerShell because Lotus Notes COM is 32-bit.`n`n" +
+        "You are running 64-bit PowerShell (for example VS Code or a 64-bit terminal).`n`n" +
+        "Run this instead:`n  $LaunchCommand"
+    )
+    exit 1
 }
 
+try {
 $ConfigPath = Join-Path $ApplicationRoot 'config.json'
-if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) { throw "Configuration not found: $ConfigPath" }
-$Config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
-
-$ModulesDirectory = Resolve-ApplicationPath -Path ([string]$Config.modules.directory) -Root $ApplicationRoot
-foreach ($ModuleName in @('Configuration', 'Security', 'JiraAPI')) {
-    $ModulePath = Join-Path $ModulesDirectory "$ModuleName.psm1"
-    if (-not (Test-Path -LiteralPath $ModulePath -PathType Leaf)) { throw "Required module not found: $ModulePath" }
-    Import-Module $ModulePath -Force -ErrorAction Stop
-}
-
-# Retrieve the Windows Credential Manager target name from config.json.
-$CredentialTarget = [string]$Config.security.credentialTarget
-
-if (:IsNullOrWhiteSpace($CredentialTarget)) {
+if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
     throw (
-        'security.credentialTarget is missing or empty in config.json. ' +
-        'For example: NotesToJira:JiraPAT'
+        "Configuration file not found: $ConfigPath`n`n" +
+        'Place config.json in the application folder, then retry.'
     )
 }
 
-Write-Host "Jira credential target: $CredentialTarget"
+try {
+    $Config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+}
+catch {
+    throw (
+        "Could not parse '$ConfigPath'.`n`n" +
+        'Check that the file is valid JSON.' +
+        "`nTechnical detail: $($_.Exception.Message)"
+    )
+}
 
-# Store the PAT if it does not exist, or replace it when -ReplacePat is used.
+$ModulesDirectory = Resolve-ApplicationPath -Path ([string]$Config.modules.directory) -Root $ApplicationRoot
+foreach ($ModuleName in @('Security', 'JiraAPI')) {
+    $ModulePath = Join-Path $ModulesDirectory "$ModuleName.psm1"
+    if (-not (Test-Path -LiteralPath $ModulePath -PathType Leaf)) {
+        throw (
+            "Required module not found: $ModulePath`n`n" +
+            'Confirm modules.directory in config.json points at the Modules folder.'
+        )
+    }
+    Import-Module $ModulePath -Force -ErrorAction Stop
+}
+
+$CredentialTarget = [string]$Config.security.credentialTarget
+$JiraUrl = [string]$Config.jira.url
+
+if ([string]::IsNullOrWhiteSpace($CredentialTarget)) {
+    throw (
+        "security.credentialTarget is missing or empty in config.json.`n`n" +
+        'Set it to a Credential Manager name, for example NotesToJira:JiraPAT.'
+    )
+}
+
+Write-UiHeader 'Notes to Jira - Import'
+if ($DryRun) {
+    Write-UiWarning 'Dry run: Jira issues, comments, and state files will not be changed.'
+}
+if ($Force) {
+    Write-UiWarning 'Force: Jira changes will be applied without a YES confirmation.'
+}
+if ($MaxIssues -gt 0) {
+    Write-UiPair 'Issue cap' $MaxIssues
+}
+Write-UiPair 'Configuration' $ConfigPath
+Write-UiPair 'Jira URL' $JiraUrl
+Write-UiPair 'Credential' $CredentialTarget
+
+Write-UiSection 'Credential'
 if (
     -not (Test-JiraPatSecret -Target $CredentialTarget) -or
     $ReplacePat
 ) {
     Set-JiraPatSecret `
         -Target $CredentialTarget `
-        -UserName ([string]$Config.jira.url) `
+        -UserName $JiraUrl `
         -Force:$ReplacePat |
         Out-Null
 
-    Write-Host `
-        'Jira PAT stored in Windows Credential Manager.' `
-        -ForegroundColor Green
+    Write-UiSuccess 'Jira PAT stored in Windows Credential Manager.'
 }
 else {
-    Write-Host `
-        'Jira PAT found in Windows Credential Manager.' `
-        -ForegroundColor Green
+    Write-UiSuccess 'Jira PAT found in Windows Credential Manager.'
 }
 
 $SecurePat = $null
 $JiraClient = $null
 
 try {
-    # Get-JiraPatSecret returns a SecureString.
-    $SecurePat = Get-JiraPatSecret `
-        -Target $CredentialTarget
+    $SecurePat = Get-JiraPatSecret -Target $CredentialTarget
 
-    # Your config uses requestTimeoutSeconds, not timeoutSeconds.
     $TimeoutSeconds = 60
-
     if ($Config.jira.PSObject.Properties['requestTimeoutSeconds']) {
-        $TimeoutSeconds =
-            [int]$Config.jira.requestTimeoutSeconds
+        $TimeoutSeconds = [int]$Config.jira.requestTimeoutSeconds
     }
 
     $MaximumRetryCount = 2
-
     if ($Config.jira.PSObject.Properties['maximumRetryCount']) {
-        $MaximumRetryCount =
-            [int]$Config.jira.maximumRetryCount
+        $MaximumRetryCount = [int]$Config.jira.maximumRetryCount
     }
 
     $JiraClient = New-JiraClient `
-        -BaseUrl ([string]$Config.jira.url) `
+        -BaseUrl $JiraUrl `
         -SecurePat $SecurePat `
         -TimeoutSeconds $TimeoutSeconds `
         -MaximumRetryCount $MaximumRetryCount
 
     if ($null -eq $JiraClient) {
-        throw 'The Jira client could not be initialized.'
+        throw (
+            "The Jira client could not be initialized.`n`n" +
+            'Check jira.url in config.json and that a PAT is stored, then retry.'
+        )
     }
 }
 finally {
-    # Release the script's reference to the SecureString as soon as the
-    # Jira client has been initialized.
     $SecurePat = $null
 }
 
 try {
-    # Resolve the Jira Epic Link custom field once. This replaces the undefined
-    # $EpicField variable in the previous script.
     $EpicField = Get-JiraEpicLinkField -Client $JiraClient
     $EpicFieldId = [string]$EpicField.id
     if ([string]::IsNullOrWhiteSpace($EpicFieldId)) {
-        throw 'Jira Epic Link discovery returned a field without an ID.'
+        throw (
+            "Jira Epic Link discovery returned a field without an ID.`n`n" +
+            'Confirm Jira Software (epics) is enabled and that the PAT user can browse issues.'
+        )
     }
-    Write-Host "Using Jira Epic Link field '$([string]$EpicField.name)' ($EpicFieldId)." -ForegroundColor Green
+
+    Write-UiSection 'Jira target'
+    Write-UiSuccess ("Epic Link field: {0} ({1})" -f $EpicField.name, $EpicFieldId)
 
     foreach ($Mailbox in @($Config.mailboxes)) {
         if ($Mailbox.PSObject.Properties['enabled'] -and -not [bool]$Mailbox.enabled) { continue }
@@ -267,7 +335,10 @@ try {
         $EpicKey = Get-ConfiguredEpicKey -Mailbox $Mailbox -Config $Config
         $ValidatedEpic = Test-JiraEpic -Client $JiraClient -EpicKey $EpicKey
         if (-not $ValidatedEpic.IsValid) {
-            throw "Configured issue '$EpicKey' is type '$($ValidatedEpic.IssueTypeName)', not Epic."
+            throw (
+                "Configured issue '$EpicKey' is a $($ValidatedEpic.IssueTypeName), not an Epic.`n`n" +
+                "Set mailboxes[].jira.epicKey or jira.defaultEpicKey to an Epic key. Current issue: $($ValidatedEpic.Summary)"
+            )
         }
 
         $Component = Get-JiraComponentByName `
@@ -275,8 +346,13 @@ try {
             -ProjectKey $ProjectKey `
             -ComponentName ([string]$Mailbox.jira.componentName)
 
-        Write-Host "Using Jira component '$($Component.name)' ($($Component.id)) in project '$ProjectKey'." -ForegroundColor Green
-        Write-Host "Using Jira Epic '$EpicKey': $($ValidatedEpic.Summary)" -ForegroundColor Green
+        Write-UiSection $MailboxName
+        Write-UiPair 'Project' $ProjectKey
+        Write-UiPair 'Component' ('{0} (ID {1})' -f $Component.name, $Component.id)
+        Write-UiPair 'Epic' ('[{0}] {1}' -f $EpicKey, $ValidatedEpic.Summary)
+        if (-not [string]::IsNullOrWhiteSpace([string]$ValidatedEpic.Url)) {
+            Write-UiPair 'Epic URL' ([string]$ValidatedEpic.Url)
+        }
 
         $StatePath = Resolve-ApplicationPath -Path ([string]$Mailbox.csvPath) -Root $ApplicationRoot
         $StateDirectory = Split-Path -Parent $StatePath
@@ -330,14 +406,29 @@ try {
         $SkippedSensitive = 0
         $SkippedProcessed = 0
         try {
-            Write-Host "`nOpening Notes mailbox: $MailboxName" -ForegroundColor Cyan
+            Write-UiInfo "Opening Notes mailbox: $MailboxName"
             $Session = New-Object -ComObject Lotus.NotesSession
             $Session.Initialize()
             $Database = $Session.GetDatabase([string]$Config.notes.server, [string]$Mailbox.databasePath)
-            if ($null -eq $Database -or -not $Database.IsOpen) { throw "Could not open Notes database '$($Mailbox.databasePath)'." }
+            if ($null -eq $Database -or -not $Database.IsOpen) {
+                throw (
+                    "Could not open Notes database '$($Mailbox.databasePath)' on server '$([string]$Config.notes.server)'.`n`n" +
+                    'Typical causes:' +
+                    "`n  - Lotus Notes is not installed or the 32-bit COM library is unavailable" +
+                    "`n  - notes.server or mailboxes[].databasePath in config.json is wrong" +
+                    "`n  - you are not connected to the Notes/Domino network"
+                )
+            }
             $View = $Database.GetView([string]$Config.notes.viewName)
-            if ($null -eq $View) { throw "Notes view '$($Config.notes.viewName)' was not found." }
-            Write-Host "Database: $($Database.Title); view: $($View.Name); documents: $($View.AllEntries.Count)" -ForegroundColor Green
+            if ($null -eq $View) {
+                throw (
+                    "Notes view '$([string]$Config.notes.viewName)' was not found in database '$($Mailbox.databasePath)'.`n`n" +
+                    'Set notes.viewName in config.json to a view that exists in that mailbox, then retry.'
+                )
+            }
+            Write-UiPair 'Database' ([string]$Database.Title)
+            Write-UiPair 'View' ([string]$View.Name)
+            Write-UiPair 'Documents in view' ([int]$View.AllEntries.Count)
 
             $Document = $View.GetFirstDocument()
             while ($null -ne $Document) {
@@ -447,38 +538,57 @@ try {
             }
         } | Export-Csv -LiteralPath $PreviewPath -NoTypeInformation -Encoding UTF8
 
-        Write-Host "`nNotes scan completed for '$MailboxName'." -ForegroundColor Cyan
-        Write-Host "New Jira issues proposed : $CreateCount"
-        Write-Host "Jira comments proposed   : $CommentCount"
-        Write-Host "Already processed skipped: $SkippedProcessed"
-        Write-Host "Sensitive emails skipped : $SkippedSensitive"
-        Write-Host "Replies without Jira map : $UnmappedCount"
-        Write-Host "Preview file              : $PreviewPath"
+        Write-UiSection "Scan summary - $MailboxName"
+        Write-UiMetric 'New issues proposed' $CreateCount -Kind Action
+        Write-UiMetric 'Comments proposed' $CommentCount -Kind Action
+        Write-UiMetric 'Already processed' $SkippedProcessed -Kind Skip
+        Write-UiMetric 'Sensitive skipped' $SkippedSensitive -Kind Skip
+        Write-UiMetric 'Replies without Jira map' $UnmappedCount -Kind Problem
+        Write-UiPair 'Preview CSV' $PreviewPath
+
+        if ($UnmappedCount -gt 0) {
+            Write-UiWarning 'Some replies were skipped because their original email has no Jira key in the state CSV.'
+            Write-UiDetail "See Action = SkipUnmappedParent in the preview CSV. Those replies will not be added as comments."
+        }
 
         if ($MaxIssues -gt 0 -and $CreateCount -gt $MaxIssues) {
-            throw "Proposed issue count ($CreateCount) exceeds -MaxIssues $MaxIssues. No Jira changes were made."
+            throw (
+                "Stopped before making Jira changes.`n`n" +
+                "Proposed new issues: $CreateCount" +
+                "`nLimit (-MaxIssues): $MaxIssues`n`n" +
+                'Raise -MaxIssues, or run with -DryRun and review the preview CSV first.' +
+                "`nPreview: $PreviewPath"
+            )
         }
         if ($DryRun) {
-            Write-Host 'DRY RUN: No Jira issues, comments, or state changes were made.' -ForegroundColor Yellow
+            Write-UiWarning 'Dry run complete. No Jira issues, comments, or state files were changed.'
+            Write-UiDetail 'Review the preview CSV, then re-run without -DryRun to apply changes.'
             continue
         }
         if (($CreateCount + $CommentCount) -eq 0) {
-            Write-Host 'No Jira changes are required.' -ForegroundColor Green
+            Write-UiSuccess 'Nothing to import for this mailbox. No Jira changes were made.'
             continue
         }
         if (-not $Force) {
-            $Answer = Read-Host "Proceed with $CreateCount new issue(s) and $CommentCount comment(s)? Type YES to continue"
+            Write-UiInfo "Type YES (exactly) to create $CreateCount issue(s) and add $CommentCount comment(s)."
+            Write-UiDetail 'Press Enter or type anything else to cancel this mailbox.'
+            $Answer = Read-Host '  Continue'
             if ($Answer -cne 'YES') {
-                Write-Host 'Cancelled. No Jira or state changes were made.' -ForegroundColor Yellow
+                Write-UiWarning 'Cancelled. No Jira or state changes were made for this mailbox.'
                 continue
             }
         }
+        else {
+            Write-UiWarning "Applying $CreateCount issue(s) and $CommentCount comment(s) without confirmation (-Force)."
+        }
 
         $CreatedKeyByDocument = @{}
+        $CreatedApplied = 0
+        $CommentedApplied = 0
         foreach ($Item in $Plan) {
             $Email = $Item.Email
             if ($Item.Action -eq 'SkipUnmappedParent') {
-                Write-Warning "Skipped reply '$($Email.subject)': its parent was processed previously but has no Jira key in the state CSV."
+                Write-UiWarning "Skipped reply '$($Email.subject)': parent was processed earlier but has no Jira key in the state CSV."
                 continue
             }
 
@@ -491,9 +601,15 @@ try {
                     -EpicKey $EpicKey `
                     -Email $Email
                 $IssueKey = [string]$Issue.key
-                if ([string]::IsNullOrWhiteSpace($IssueKey)) { throw 'Jira created an issue but returned no issue key.' }
+                if ([string]::IsNullOrWhiteSpace($IssueKey)) {
+                    throw (
+                        "Jira created an issue but returned no issue key.`n`n" +
+                        'Check Jira for a newly created issue from this run before retrying, to avoid duplicates.'
+                    )
+                }
                 $CreatedKeyByDocument[$Email.universalid] = $IssueKey
-                Write-Host "Created Jira issue ${IssueKey}: $($Email.subject)" -ForegroundColor Green
+                $CreatedApplied++
+                Write-UiSuccess "Created ${IssueKey}: $($Email.subject)"
                 $ActionTaken = 'CreatedIssue'
                 $RootId = $Email.universalid
             }
@@ -502,12 +618,16 @@ try {
                 if ($IssueKey -like 'PENDING:*') {
                     $RootId = $IssueKey.Substring(8)
                     if (-not $CreatedKeyByDocument.ContainsKey($RootId)) {
-                        throw "Could not resolve newly created Jira issue for Notes root '$RootId'."
+                        throw (
+                            "Could not resolve the newly created Jira issue for Notes root '$RootId'.`n`n" +
+                            'The parent email should have been created earlier in this run. Review the preview CSV and retry.'
+                        )
                     }
                     $IssueKey = $CreatedKeyByDocument[$RootId]
                 }
                 Add-JiraEmailComment -Client $JiraClient -IssueKey $IssueKey -Email $Email | Out-Null
-                Write-Host "Added Notes reply as a comment to ${IssueKey}: $($Email.subject)" -ForegroundColor Green
+                $CommentedApplied++
+                Write-UiSuccess "Commented on ${IssueKey}: $($Email.subject)"
                 $ActionTaken = 'AddedComment'
                 $RootId = if ($Item.ConversationMarker -like 'PENDING:*') {
                     $Item.ConversationMarker.Substring(8)
@@ -535,11 +655,19 @@ try {
             $IssueByDocument[$Email.universalid] = $IssueKey
             Save-State -State $State -Path $StatePath
         }
-        Write-Host "Completed '$MailboxName'. State saved to $StatePath" -ForegroundColor Green
+        Write-UiSuccess "Finished mailbox '$MailboxName'."
+        Write-UiMetric 'Issues created' $CreatedApplied -Kind Action
+        Write-UiMetric 'Comments added' $CommentedApplied -Kind Action
+        Write-UiPair 'State file' $StatePath
     }
 }
 finally {
     if ($null -ne $JiraClient) { Remove-JiraClient -Client $JiraClient }
     [GC]::Collect()
     [GC]::WaitForPendingFinalizers()
+}
+}
+catch {
+    Write-UiError -ErrorRecord $_
+    exit 1
 }
