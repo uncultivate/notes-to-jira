@@ -1,0 +1,63 @@
+{
+  "modules": {
+    "directory": "Modules"
+  },
+  "security": {
+    "credentialTarget": "NotesToJira:JiraPAT"
+  },
+  "jira": {
+    "url": "https://jira.infra.abs.gov.au",
+    "requestTimeoutSeconds": 60,
+    "metadataCacheMinutes": 1440,
+    "startDateFieldId": "customfield_13302",
+    "dueAfterDays": 14,
+    "defaultEpicKey": "MADIP-14754",
+    "description": {
+      "introduction": "This query is automatically generated. Please see the email chain attached for full context.",
+      "action": "Please draft a response.",
+      "linkText": "View email"
+    }
+  },
+  "notes": {
+    "server": "DomCO1520/SVR/ABS",
+    "viewName": "By Category"
+  },
+  "processing": {
+    "sensitiveSubjectPatterns": [
+      "*SEC=OFFICIAL:Sensitive*",
+      "*SEC=PROTECTED*"
+    ],
+    "subjectTextToRemove": [
+      "[SEC=OFFICIAL]",
+      "[SEC=UNOFFICIAL]"
+    ],
+    "emptySubjectText": "NO SUBJECT"
+  },
+  "mailboxes": [
+    {
+      "name": "General Enquiries",
+      "enabled": true,
+      "databasePath": "wdb002\\w5441024.nsf",
+      "csvPath": "\\\\corp\\absdfs\\workgroup\\MASS\\MAS\\Systems\\DataLab\\JIRA Ticket Folder\\jira.csv",
+      "includedCategoryPaths": [
+        "00 Intray\\04 General Enquiries\\Brianna Bennett-van Daele's Intray"
+      ],
+      "jiraCategoryPaths": [
+        "00 Intray\\04 General Enquiries\\Brianna Bennett-van Daele's Intray"
+      ],
+      "includeDescendantCategories": false,
+      "jira": {
+        "projectKey": "MADIP",
+        "issueType": "Task",
+        "labels": [
+          "Query",
+          "WDB_Inbox",
+          "General_Enquiry"
+        ],
+        "componentName": "Business Tasks",
+        "epicKey": "MADIP-14754"
+
+      }
+    }
+  ]
+}
